@@ -82,8 +82,19 @@ def _get_aws_client(profile, region, service):
             logging.exception("Error determining region used for AWS client.  Typo in code?\n\n" +
                               str(e))
             sys.exit(1)
-
-    if profile:
+    if aws_region == 'us-fake-1':
+        aws_region = os.getenv("AWS_DEFAULT_REGION")
+        aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
+        aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+        aws_ddb_endpoint_url = os.getenv("AWS_DDB_ENDPOINT_URL")
+        client = boto3.client(
+            service,
+            region_name=aws_region,
+            endpoint_url=aws_ddb_endpoint_url,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key
+        )
+    elif profile:
         session = boto3.Session(profile_name=profile)
         client = session.client(service, region_name=aws_region)
     else:
@@ -279,22 +290,22 @@ def get_table_name_matches(conn, table_name_wildcard, separator):
 
     all_tables = []
     last_evaluated_table_name = None
-
     while True:
-        table_list = conn.list_tables(exclusive_start_table_name=last_evaluated_table_name)
+        if os.getenv("AWS_DEFAULT_REGION") == 'us-fake-1':
+            table_list = conn.list_tables()
+        else:
+            table_list = conn.list_tables(exclusive_start_table_name=last_evaluated_table_name)
         all_tables.extend(table_list["TableNames"])
 
         try:
             last_evaluated_table_name = table_list["LastEvaluatedTableName"]
         except KeyError:
             break
-
     matching_tables = []
     for table_name in all_tables:
         if fnmatch.fnmatch(table_name, table_name_wildcard):
             logging.info("Adding %s", table_name)
             matching_tables.append(table_name)
-
     return matching_tables
 
 
@@ -337,7 +348,8 @@ def change_destination_tablename(source_table_name, source_wildcard, destination
     """
     Update prefix used for searching tables
     """
-
+    if os.getenv("AWS_DEFAULT_REGION") == 'us-fake-1':
+        return f'{destination_wildcard}Table'
     source_prefix = source_wildcard.split("*", 1)[0]
     source_surffix = source_wildcard.split("*", 1)[1]
     destination_prefix = destination_wildcard.split("*", 1)[0]
@@ -417,12 +429,14 @@ def batch_write(conn, sleep_interval, table_name, put_requests):
     """
     Write data to table_name
     """
-
     request_items = {table_name: put_requests}
     i = 1
     sleep = sleep_interval
     while True:
-        response = conn.batch_write_item(request_items)
+        if os.getenv("AWS_REGION") == 'us-fake-1':
+            response = conn.batch_write_item(RequestItems=request_items)
+        else:
+            response = conn.batch_write_item(request_items)
         unprocessed_items = response["UnprocessedItems"]
 
         if len(unprocessed_items) == 0:
@@ -448,13 +462,22 @@ def wait_for_active_table(conn, table_name, verb):
     """
 
     while True:
-        if conn.describe_table(table_name)["Table"]["TableStatus"] != "ACTIVE":
-            logging.info("Waiting for " + table_name + " table to be " + verb + ".. [" +
-                         conn.describe_table(table_name)["Table"]["TableStatus"] + "]")
-            time.sleep(sleep_interval)
+        if os.getenv("AWS_REGION") == 'us-fake-1':
+            if conn.describe_table(TableName=table_name)["Table"]["TableStatus"] != "ACTIVE":
+                logging.info("Waiting for " + table_name + " table to be " + verb + ".. [" +
+                            conn.describe_table(TableName=table_name)["Table"]["TableStatus"] + "]")
+                time.sleep(sleep_interval)
+            else:
+                logging.info(table_name + " " + verb + ".")
+                break
         else:
-            logging.info(table_name + " " + verb + ".")
-            break
+            if conn.describe_table(table_name)["Table"]["TableStatus"] != "ACTIVE":
+                logging.info("Waiting for " + table_name + " table to be " + verb + ".. [" +
+                            conn.describe_table(table_name)["Table"]["TableStatus"] + "]")
+                time.sleep(sleep_interval)
+            else:
+                logging.info(table_name + " " + verb + ".")
+                break
 
 
 def update_provisioned_throughput(conn, table_name, read_capacity, write_capacity, wait=True):
@@ -874,7 +897,15 @@ def main():
         sys.exit(1)
 
     # instantiate connection
-    if args.region == LOCAL_REGION:
+    if args.region == 'us-fake-1':
+        conn=boto3.client(
+            'dynamodb',
+            region_name=args.region,
+            endpoint_url=f'http://{args.host}:{args.port}',
+            aws_access_key_id=args.accessKey,
+            aws_secret_access_key=args.secretKey)
+        sleep_interval = LOCAL_SLEEP_INTERVAL
+    elif args.region == LOCAL_REGION:
         conn = boto.dynamodb2.layer1.DynamoDBConnection(aws_access_key_id=args.accessKey,
                                                         aws_secret_access_key=args.secretKey,
                                                         host=args.host,
@@ -983,55 +1014,90 @@ def main():
             do_get_s3_archive(args.profile, args.region, args.bucket, args.srcTable, args.archive)
 
         if dest_table.find("*") != -1:
-            matching_destination_tables = get_table_name_matches(conn, dest_table, prefix_separator)
-            delete_str = ": " if args.dataOnly else " to be deleted: "
-            logging.info(
-                "Found " + str(len(matching_destination_tables)) +
-                " table(s) in DynamoDB host" + delete_str +
-                ", ".join(matching_destination_tables))
+            if os.getenv("AWS_REGION") == 'us-fake-1':
+                matching_restore_tables = get_restore_table_matches(args.srcTable, prefix_separator)
+                logging.info(
+                    "Found " + str(len(matching_restore_tables)) +
+                    " table(s) in " + args.dumpPath + " to restore: " + ", ".join(
+                        matching_restore_tables))
+                    
+                threads = []
+                for source_table in matching_restore_tables:
+                    dest_table = source_table.split('-')[0]
+                    if args.srcTable == "*":
+                        t = threading.Thread(target=do_restore,
+                                            args=(conn,
+                                                sleep_interval,
+                                                source_table,
+                                                source_table,
+                                                args.writeCapacity))
+                    else:
+                        t = threading.Thread(target=do_restore,
+                                            args=(conn, sleep_interval, source_table,
+                                                change_destination_tablename(source_table,
+                                                                args.srcTable,
+                                                                dest_table,
+                                                                prefix_separator),
+                                                args.writeCapacity))
+                    threads.append(t)
+                    t.start()
+                    time.sleep(THREAD_START_DELAY)
 
-            threads = []
-            for table in matching_destination_tables:
-                t = threading.Thread(target=delete_table, args=(conn, sleep_interval, table))
-                threads.append(t)
-                t.start()
-                time.sleep(THREAD_START_DELAY)
+                for thread in threads:
+                    thread.join()
 
-            for thread in threads:
-                thread.join()
+                logging.info("Restore of table(s) " + args.srcTable + " to " +
+                            dest_table + " completed!")
+            else: 
+                matching_destination_tables = get_table_name_matches(conn, dest_table, prefix_separator)
+                delete_str = ": " if args.dataOnly else " to be deleted: "
+                logging.info(
+                    "Found " + str(len(matching_destination_tables)) +
+                    " table(s) in DynamoDB host" + delete_str +
+                    ", ".join(matching_destination_tables))
 
-            matching_restore_tables = get_restore_table_matches(args.srcTable, prefix_separator)
-            logging.info(
-                "Found " + str(len(matching_restore_tables)) +
-                " table(s) in " + args.dumpPath + " to restore: " + ", ".join(
-                    matching_restore_tables))
+                threads = []
+                for table in matching_destination_tables:
+                    t = threading.Thread(target=delete_table, args=(conn, sleep_interval, table))
+                    threads.append(t)
+                    t.start()
+                    time.sleep(THREAD_START_DELAY)
 
-            threads = []
-            for source_table in matching_restore_tables:
-                if args.srcTable == "*":
-                    t = threading.Thread(target=do_restore,
-                                         args=(conn,
-                                               sleep_interval,
-                                               source_table,
-                                               source_table,
-                                               args.writeCapacity))
-                else:
-                    t = threading.Thread(target=do_restore,
-                                         args=(conn, sleep_interval, source_table,
-                                               change_destination_tablename(source_table,
-                                                             args.srcTable,
-                                                             dest_table,
-                                                             prefix_separator),
-                                               args.writeCapacity))
-                threads.append(t)
-                t.start()
-                time.sleep(THREAD_START_DELAY)
+                for thread in threads:
+                    thread.join()
 
-            for thread in threads:
-                thread.join()
+                matching_restore_tables = get_restore_table_matches(args.srcTable, prefix_separator)
+                logging.info(
+                    "Found " + str(len(matching_restore_tables)) +
+                    " table(s) in " + args.dumpPath + " to restore: " + ", ".join(
+                        matching_restore_tables))
+                    
+                threads = []
+                for source_table in matching_restore_tables:
+                    if args.srcTable == "*":
+                        t = threading.Thread(target=do_restore,
+                                            args=(conn,
+                                                sleep_interval,
+                                                source_table,
+                                                source_table,
+                                                args.writeCapacity))
+                    else:
+                        t = threading.Thread(target=do_restore,
+                                            args=(conn, sleep_interval, source_table,
+                                                change_destination_tablename(source_table,
+                                                                args.srcTable,
+                                                                dest_table,
+                                                                prefix_separator),
+                                                args.writeCapacity))
+                    threads.append(t)
+                    t.start()
+                    time.sleep(THREAD_START_DELAY)
 
-            logging.info("Restore of table(s) " + args.srcTable + " to " +
-                         dest_table + " completed!")
+                for thread in threads:
+                    thread.join()
+
+                logging.info("Restore of table(s) " + args.srcTable + " to " +
+                            dest_table + " completed!")
         else:
             delete_table(conn, sleep_interval, dest_table)
             do_restore(conn, sleep_interval, args.srcTable, dest_table, args.writeCapacity)

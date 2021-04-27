@@ -161,3 +161,62 @@ python dynamodump.py -m backup -r local -s testTable --host localhost --port 800
 python dynamodump.py -m restore -r local -s testTable --host localhost --port 8000 --accessKey a --secretKey a
 ```
 Multiple table backup/restore as stated in the AWS examples are also available for local.
+
+Local development NOTE
+----------------------
+- JS Local Mode Example for amplify
+  - Ref: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-envvars.html
+  - Ref: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Tools.CLI.html#Tools.CLI.UsingWithDDBLocal
+  - AWS_DEFAULT_REGION
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+  - `--endpoint-url http://localhost:8000`
+
+```js
+new aws.DynamoDB({
+  region: 'us-fake-1',
+  endpoint: 'http://localhost:62224',
+  credentials: new aws.Credentials({
+    accessKeyId: 'fake',
+    secretAccessKey: 'fake',
+  })})
+    .listTables()
+    .promise()
+    .then(console.log);
+```
+
+```python
+  def client(self, service_name, region_name=None, api_version=None,
+              use_ssl=True, verify=None, endpoint_url=None,
+              aws_access_key_id=None, aws_secret_access_key=None,
+              aws_session_token=None, config=None):
+    ...
+  ddb = boto3.resource(
+    'dynamodb',
+    endpoint_url='http://localhost:62224',
+    aws_access_key_id='fake',
+    aws_secret_access_key='fake',
+    region_name='us-fake-1')
+  tables = list(ddb.tables.all())
+  print(tables)
+    ... or
+  bc=boto3.client(
+    'dynamodb',
+    region_name='us-fake-1',
+    endpoint_url='http://localhost:62224',
+    aws_access_key_id='fake',
+    aws_secret_access_key='fake')
+  bc.list_tables()
+```
+
+```bash
+AWS_DEFAULT_REGION=us-fake-1 AWS_ACCESS_KEY_ID=fake AWS_SECRET_ACCESS_KEY=fake aws dynamodb list-tables --endpoint-url http://localhost:62224
+```
+
+- Dump from cloud dev
+```bash
+python dynamodump.py -m backup -r us-east-1 -s "*-og2r52jvovfudb276njs7hv5r4-dev"
+
+# python dynamodump.py -m truncate -r us-fake-1 -s "*"
+AWS_DEFAULT_REGION=us-fake-1 AWS_REGION=us-fake-1 AWS_ACCESS_KEY_ID=fake AWS_SECRET_ACCESS_KEY=fake AWS_DDB_ENDPOINT_URL=http://localhost:62224 python dynamodump.py -m restore -r us-fake-1 -s "*-og2r52jvovfudb276njs7hv5r4-dev" -d "*" --dataOnly --skipThroughputUpdate --host 127.0.0.1 --port 62224
+```
